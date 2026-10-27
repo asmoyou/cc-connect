@@ -535,6 +535,8 @@ type workspaceInitFlow struct {
 // The message is NOT sent to agent stdin at queue time; the event loop
 // sends it after the current turn completes to avoid mid-turn interference.
 type queuedMessage struct {
+	queueID           string // random callback identity, independent of platform message IDs
+	queueChoiceClosed bool
 	messageID         string
 	platform          Platform
 	replyCtx          any
@@ -570,6 +572,7 @@ type interactiveState struct {
 	stopped                  bool
 	pending                  *pendingPermission
 	pendingUserInput         *pendingUserInput
+	queueSteering            bool            // one queue handoff at a time; protected by mu
 	pendingMessages          []queuedMessage // messages queued while session was busy
 	approveAll               bool            // when true, auto-approve all permission requests for this session
 	fromVoice                bool            // true if current turn originated from voice transcription
@@ -3434,6 +3437,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		return true // handled: queue-full reply sent
 	}
 	state.pendingMessages = append(state.pendingMessages, queuedMessage{
+		queueID:           newQueuedMessageID(),
 		messageID:         msg.MessageID,
 		platform:          p,
 		replyCtx:          msg.ReplyCtx,
@@ -3475,7 +3479,12 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 		"user", msg.UserName,
 		"queue_depth", queueDepth,
 	)
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	queued := state.pendingMessages[len(state.pendingMessages)-1]
+	if _, ok := state.agentSession.(UserInputSteerer); ok && supportsCards(p) && msg.UserID != "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
+		e.sendQueuedMessageChoice(p, msg.ReplyCtx, queued)
+	} else {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	}
 	return true
 }
 
@@ -7083,6 +7092,10 @@ var builtinCommands = []struct {
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
+	if len(args) == 2 && (args[0] == "--queued" || args[0] == "--keep") {
+		e.handleQueuedMessageChoice(p, msg, args[1], args[0] == "--keep")
+		return
+	}
 	text := strings.TrimSpace(strings.Join(args, " "))
 	if text == "" {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsEmpty))
