@@ -537,6 +537,7 @@ type workspaceInitFlow struct {
 type queuedMessage struct {
 	queueID           string // random callback identity, independent of platform message IDs
 	queueChoiceClosed bool
+	choiceReceipt     *queuedChoiceReceipt
 	messageID         string
 	platform          Platform
 	replyCtx          any
@@ -3482,7 +3483,7 @@ func (e *Engine) queueMessageForBusySession(p Platform, msg *Message, interactiv
 	)
 	queued := state.pendingMessages[len(state.pendingMessages)-1]
 	if _, ok := state.agentSession.(UserInputSteerer); ok && supportsCards(p) && msg.UserID != "" && len(msg.Images) == 0 && len(msg.Files) == 0 {
-		e.sendQueuedMessageChoice(p, msg.ReplyCtx, queued)
+		state.pendingMessages[len(state.pendingMessages)-1].choiceReceipt = e.sendQueuedMessageChoice(p, msg.ReplyCtx, queued)
 	} else {
 		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
 	}
@@ -6661,6 +6662,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
+				e.markQueuedMessageProcessing(queued)
 
 				// Stop the previous turn's typing indicator
 				if stopTyping != nil {
@@ -7015,6 +7017,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
+		e.markQueuedMessageProcessing(queued)
 
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)

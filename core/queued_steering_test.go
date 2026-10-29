@@ -3,10 +3,93 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
+
+func assertSingleQueuedChoice(t *testing.T, card *Card) {
+	t.Helper()
+	count := 0
+	for _, element := range card.Elements {
+		if row, ok := element.(CardActions); ok {
+			for _, button := range row.Buttons {
+				count++
+				if !strings.HasPrefix(button.Value, "cmd:/ps --queued ") {
+					t.Fatalf("queue receipt has a redundant action: %s", button.Value)
+				}
+			}
+		}
+	}
+	if count != 1 {
+		t.Fatalf("queue receipt has %d actions, want only immediate delivery", count)
+	}
+}
+
+func TestQueuedSteering_DrainUpdatesUnclickedCard(t *testing.T) {
+	p := &trackedQueuedChoicePlatform{}
+	p.n = "test"
+	s := &asyncInputSession{events: make(chan Event, 8), active: true}
+	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	const key = "test:drain"
+	session := e.sessions.GetOrCreateActive(key)
+	gen, _ := session.TryLock()
+	state := &interactiveState{agentSession: s, busySession: session}
+	e.interactiveStates[key] = state
+	if !e.queueMessageForBusySession(p, &Message{SessionKey: key, UserID: "author", Content: "queued task", ReplyCtx: "user-message"}, key) {
+		t.Fatal("message was not queued")
+	}
+	done := make(chan bool, 1)
+	go func() { done <- e.drainPendingMessages(state, session, e.sessions, key, gen) }()
+	waitAsyncInput(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) == 1 })
+	updates := p.getChoiceUpdates()
+	if len(updates) != 1 || updates[0].ctx != "sent-card-1" {
+		t.Fatal("drain did not update its unclicked card")
+	}
+	assertClosedQueuedChoice(t, updates[0].card, e.i18n.T(MsgQueueProcessing), "queued task")
+	s.events <- Event{Type: EventResult, Content: "task complete", Done: true}
+	select {
+	case unlocked := <-done:
+		if !unlocked {
+			t.Fatal("drain did not release session")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("drain did not complete")
+	}
+}
+
+func TestQueuedSteering_LateKeepDoesNotOverwriteAutomaticDelivery(t *testing.T) {
+	p := &trackedQueuedChoicePlatform{}
+	p.n = "test"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	queued := queuedMessage{platform: p, content: "queued task", choiceReceipt: &queuedChoiceReceipt{replyCtx: "sent-card-1"}}
+	e.markQueuedMessageProcessing(queued)
+	e.finishQueuedMessageChoice(p, &Message{ReplyCtx: "clicked-card"}, queued, MsgQueueKept, MsgMessageQueued, "blue")
+	updates := p.getChoiceUpdates()
+	if len(updates) != 1 {
+		t.Fatal("late Keep replaced the processing status")
+	}
+	assertClosedQueuedChoice(t, updates[0].card, e.i18n.T(MsgQueueProcessing), "queued task")
+}
+
+func TestQueuedSteering_TrackedSendFailureRetainsQueuedMessage(t *testing.T) {
+	p := &trackedQueuedChoicePlatform{trackErr: errors.New("send unavailable")}
+	p.n = "test"
+	s := &asyncInputSession{events: make(chan Event, 8), active: true}
+	e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, "", LangEnglish)
+	const key = "test:send-failure"
+	state := &interactiveState{agentSession: s}
+	e.interactiveStates[key] = state
+	if !e.queueMessageForBusySession(p, &Message{SessionKey: key, UserID: "author", Content: "queued task", ReplyCtx: "user-message"}, key) {
+		t.Fatal("card send failure rejected the message")
+	}
+	if len(state.pendingMessages) != 1 || state.pendingMessages[0].choiceReceipt != nil || !strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgMessageQueued)) {
+		t.Fatal("card send failure lost the queue or its text receipt")
+	}
+}
 
 type queuedChoiceCardUpdate struct {
 	ctx  any
@@ -25,11 +108,30 @@ func (p *queuedChoicePlatform) UpdateActionCard(_ context.Context, ctx any, card
 	if p.updateErr != nil {
 		return false, p.updateErr
 	}
-	if ctx != "clicked-card" {
+	if ctx != "clicked-card" && !strings.HasPrefix(fmt.Sprint(ctx), "sent-card-") {
 		return false, nil
 	}
 	p.updates = append(p.updates, queuedChoiceCardUpdate{ctx: ctx, card: card})
 	return true, nil
+}
+
+type trackedQueuedChoicePlatform struct {
+	queuedChoicePlatform
+	cardCount int
+	trackErr  error
+}
+
+func (p *trackedQueuedChoicePlatform) SendTrackedCard(ctx context.Context, replyCtx any, card *Card) (any, error) {
+	if p.trackErr != nil {
+		return nil, p.trackErr
+	}
+	if err := p.SendCard(ctx, replyCtx, card); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.cardCount++
+	return fmt.Sprintf("sent-card-%d", p.cardCount), nil
 }
 
 func (p *queuedChoicePlatform) getChoiceUpdates() []queuedChoiceCardUpdate {
@@ -143,13 +245,14 @@ func (s *queuedSteeringSession) SteerUserInput(prompt string) (bool, error) {
 func queuedChoiceAction(t *testing.T, card *Card, keep bool) string {
 	t.Helper()
 	prefix := "cmd:/ps --queued "
-	if keep {
-		prefix = "cmd:/ps --keep "
-	}
 	for _, element := range card.Elements {
 		if row, ok := element.(CardActions); ok {
 			for _, button := range row.Buttons {
 				if strings.HasPrefix(button.Value, prefix) {
+					if keep {
+						// Old cards may still send Keep callbacks after upgrading.
+						return "/ps --keep " + strings.TrimPrefix(button.Value, prefix)
+					}
 					return strings.TrimPrefix(button.Value, "cmd:")
 				}
 			}

@@ -74,9 +74,12 @@ To restore the previous behavior of always continuing, set `reset_on_idle_mins =
 When a task is running, text follow-ups stay queued by default. If the agent
 supports steering the active turn (currently Codex with `backend = "app_server"`)
 and the messaging platform supports interactive cards, the queue receipt offers
-**Add to current task now** and **Keep queued**. Only the author of that message
-can choose its delivery. Keeping it queued closes the choice; expired or repeated
-buttons cannot submit it again. Images and files retain ordinary queue delivery.
+one **Add to current task now** button, usable only by the message author.
+No click is needed to keep queueing: after the current turn completes, messages
+are delivered in order in the same conversation. On platforms with tracked
+cards, automatic delivery replaces the original receipt with a processing status
+and removes the button. Expired or repeated callbacks cannot submit it again.
+Images and files retain ordinary queue delivery.
 
 Adding to the current task uses the adapter's native steering capability. It does
 not terminate a running tool. If the adapter confirms there is no active turn,
