@@ -35,7 +35,7 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: Check Go formatting
         run: |
-          files=$(gofmt -l core/queued_steering.go core/queued_steering_test.go core/cuj_test.go core/i18n.go core/interfaces.go platform/feishu/card.go platform/feishu/feishu.go platform/feishu/queued_steering_test.go platform/feishu/card_action_update_test.go)
+          files=$(gofmt -l core/queued_steering.go core/queued_steering_test.go core/cuj_test.go core/i18n.go core/interfaces.go platform/feishu/card.go platform/feishu/feishu.go platform/feishu/queued_steering_test.go platform/feishu/card_action_update_test.go core/session_switch.go core/session_switch_test.go core/session_id_validation_test.go core/session_teardown_test.go core/relay_test.go core/engine_test.go agent/codex/appserver_session.go agent/codex/appserver_session_test.go agent/acp/session.go agent/acp/session_resume_test.go agent/copilot/session.go agent/copilot/session_resume_test.go)
           if [ -n "$files" ]; then
             printf '%s\n' "$files"
             while IFS= read -r file; do
@@ -59,7 +59,7 @@ jobs:
       - name: Run critical user journeys and interaction race checks
         run: |
           go test ./core/ -run TestCUJ
-          go test -race ./core ./platform/feishu ./agent/codex -run 'TestQueuedSteering|TestCUJ_C6|TestInteractivePlatform_QueuedSteeringCallbacks|TestUpdateActionCard|TestSendTrackedCard|TestAppServerSession_.*Idle'
+          go test -race ./core ./platform/feishu ./agent/codex ./agent/acp ./agent/copilot -run 'TestQueuedSteering|TestCUJ_C6|TestInteractivePlatform_QueuedSteeringCallbacks|TestUpdateActionCard|TestSendTrackedCard|TestAppServerSession_.*Idle|TestCUJ_B3|TestSwitchPreview|TestUnsafeResume|TestResumeFailure|TestIssue599|TestHandleRelay_Resume|TestHandshake_|TestAppServerSession_.*Resume'
       - name: Confirm regression test detects the original bug
         run: |
           original=$(mktemp)
@@ -80,7 +80,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/asmo/release
-          version=v1.5.1-beta.4.steering.3
+          version=v1.5.1-beta.4.steering.4
           commit=$(git rev-parse --short HEAD)
           built=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
           for target in darwin linux; do
@@ -159,7 +159,7 @@ jobs:
           set -euo pipefail
           (cd dist && sha256sum --check SHA256SUMS)
           cat > release-notes.md <<EOF
-          Fork build of cc-connect v1.5.1-beta.4.steering.3, including queued-message card improvements.
+          Fork build of cc-connect v1.5.1-beta.4.steering.4, including queued-message card improvements and safe session switching with latest-message previews.
 
           Commit: $BUILD_SHA
           Build and checks: $BUILD_RUN_URL

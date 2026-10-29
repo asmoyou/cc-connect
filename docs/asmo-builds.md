@@ -1,6 +1,6 @@
 # Asmo fork builds
 
-我们 fork 的维护和打包分支是 `main`。通过检查后，GitHub Actions 自动更新 [asmo-latest 预览版](https://github.com/asmoyou/cc-connect/releases/tag/asmo-latest)。这是包含消息队列卡片改进的 fork 版本。
+我们 fork 的维护和打包分支是 `main`。通过检查后，GitHub Actions 自动更新 [asmo-latest 预览版](https://github.com/asmoyou/cc-connect/releases/tag/asmo-latest)。这是包含消息队列卡片改进、会话恢复失败保护和切换后最近消息预览的 fork 版本。
 
 目前提供两个预编译版本，无需拉取源码或安装 Go：
 
