@@ -1,11 +1,132 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+type queuedChoiceCardUpdate struct {
+	ctx  any
+	card *Card
+}
+
+type queuedChoicePlatform struct {
+	asyncInputPlatform
+	updates   []queuedChoiceCardUpdate
+	updateErr error
+}
+
+func (p *queuedChoicePlatform) UpdateActionCard(_ context.Context, ctx any, card *Card) (bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.updateErr != nil {
+		return false, p.updateErr
+	}
+	if ctx != "clicked-card" {
+		return false, nil
+	}
+	p.updates = append(p.updates, queuedChoiceCardUpdate{ctx: ctx, card: card})
+	return true, nil
+}
+
+func (p *queuedChoicePlatform) getChoiceUpdates() []queuedChoiceCardUpdate {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]queuedChoiceCardUpdate(nil), p.updates...)
+}
+
+func assertClosedQueuedChoice(t *testing.T, card *Card, status, content string) {
+	t.Helper()
+	if !strings.Contains(card.RenderText(), status) || !strings.Contains(card.RenderText(), content) {
+		t.Fatalf("choice card lost its status or message: %s", card.RenderText())
+	}
+	for _, element := range card.Elements {
+		if _, ok := element.(CardActions); ok {
+			t.Fatal("processed choice card still has clickable buttons")
+		}
+	}
+}
+
+func TestQueuedSteering_ReplacesClickedCardAndRemovesButtons(t *testing.T) {
+	for _, scenario := range []string{"keep", "delivered", "idle", "unconfirmed", "update-error", "typed-command", "other-user"} {
+		t.Run(scenario, func(t *testing.T) {
+			p := &queuedChoicePlatform{}
+			p.n = "test"
+			s := &queuedSteeringSession{asyncInputSession: asyncInputSession{events: make(chan Event, 8), active: true}}
+			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+			const key = "test:chat:user"
+			session := e.sessions.GetOrCreateActive(key)
+			gen, _ := session.TryLock()
+			defer session.Unlock(gen)
+			const content = "Use staging instead"
+			state := &interactiveState{agentSession: s, busySession: session, pendingMessages: []queuedMessage{
+				{queueID: "one", content: content, userID: "author"},
+			}}
+			e.interactiveStates[key] = state
+			msg := &Message{SessionKey: key, UserID: "author", ReplyCtx: "clicked-card"}
+			status := MsgPsSent
+			switch scenario {
+			case "keep":
+				status = MsgMessageQueued
+			case "idle":
+				s.active = false
+				status = MsgMessageQueued
+			case "unconfirmed":
+				s.err = errors.New("acknowledgement lost")
+				status = MsgQueueSteerUnconfirmed
+			case "update-error":
+				p.updateErr = errors.New("patch unavailable")
+			case "typed-command":
+				msg.ReplyCtx = "user-message"
+			case "other-user":
+				msg.UserID = "someone-else"
+			}
+			if scenario == "delivered" {
+				s.steer = func(string) (bool, error) {
+					updates := p.getChoiceUpdates()
+					if len(updates) != 1 {
+						t.Fatalf("buttons were not removed before steering: %#v", updates)
+					}
+					assertClosedQueuedChoice(t, updates[0].card, e.i18n.T(MsgQueueSteerPending), content)
+					// A replay while the adapter is busy must not replace the
+					// processing card or deliver the message a second time.
+					e.handleQueuedMessageChoice(p, msg, "one", true)
+					return true, nil
+				}
+			}
+			e.handleQueuedMessageChoice(p, msg, "one", scenario == "keep")
+			updates := p.getChoiceUpdates()
+			if scenario == "other-user" {
+				if len(updates) != 0 || len(s.steered) != 0 || state.pendingMessages[0].queueChoiceClosed {
+					t.Fatal("another user modified the author's choice")
+				}
+				return
+			}
+			if scenario == "update-error" || scenario == "typed-command" {
+				if len(updates) != 0 || len(s.steered) != 1 || !strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(status)) {
+					t.Fatal("card update failure lost the delivery or text receipt")
+				}
+				return
+			}
+			want := 2
+			if scenario == "keep" {
+				want = 1
+			}
+			if len(updates) != want {
+				t.Fatalf("got %d card updates, want %d", len(updates), want)
+			}
+			assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(status), content)
+			e.handleQueuedMessageChoice(p, msg, "one", false)
+			e.handleQueuedMessageChoice(p, msg, "one", true)
+			if len(p.getChoiceUpdates()) != want {
+				t.Fatal("repeat clicks overwrote the final card")
+			}
+		})
+	}
+}
 
 type queuedSteeringSession struct {
 	asyncInputSession

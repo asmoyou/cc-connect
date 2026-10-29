@@ -18,6 +18,33 @@ func (e *Engine) sendQueuedMessageChoice(p Platform, replyCtx any, queued queued
 	e.sendWithCard(p, replyCtx, card)
 }
 
+// Only call after claiming the author's choice. Rejected or duplicate clicks
+// must not overwrite an in-flight or completed card with a different status.
+func (e *Engine) updateQueuedMessageChoice(p Platform, msg *Message, queued queuedMessage, title, detail MsgKey, color string) bool {
+	updater, ok := p.(CardActionUpdater)
+	if !ok {
+		return false
+	}
+	card := NewCard().Title(e.i18n.T(title), color).
+		Markdown(e.i18n.T(detail)).Markdown(truncateIf(queued.content, 240)).Build()
+	if err := e.waitOutgoing(p); err != nil {
+		slog.Warn("queued choice card update cancelled", "error", err)
+		return false
+	}
+	updated, err := updater.UpdateActionCard(e.ctx, msg.ReplyCtx, e.renderCardForPlatform(p, card))
+	if err != nil {
+		slog.Warn("queued choice card update failed", "error", err)
+		return false
+	}
+	return updated
+}
+
+func (e *Engine) finishQueuedMessageChoice(p Platform, msg *Message, queued queuedMessage, title, detail MsgKey, color string) {
+	if !e.updateQueuedMessageChoice(p, msg, queued, title, detail, color) {
+		e.reply(p, msg.ReplyCtx, e.i18n.T(detail))
+	}
+}
+
 // Remove the message before calling the adapter so result handling cannot also
 // drain it. Only a confirmed non-delivery (false, nil) returns it to the queue;
 // an error may mean the remote accepted input but its acknowledgement was lost.
@@ -46,8 +73,9 @@ func (e *Engine) handleQueuedMessageChoice(p Platform, msg *Message, id string, 
 	}
 	if keep {
 		state.pendingMessages[index].queueChoiceClosed = true
+		queued := state.pendingMessages[index]
 		state.mu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+		e.finishQueuedMessageChoice(p, msg, queued, MsgQueueKept, MsgMessageQueued, "blue")
 		return
 	}
 	sender, ok := state.agentSession.(UserInputSteerer)
@@ -72,6 +100,7 @@ func (e *Engine) handleQueuedMessageChoice(p Platform, msg *Message, id string, 
 	session := state.busySession
 	workspace := state.workspaceDir
 	state.mu.Unlock()
+	e.updateQueuedMessageChoice(p, msg, queued, MsgQueueSteerPending, MsgQueueSteerPending, "blue")
 
 	agent, sessions := e.sessionContextForKey(msg.SessionKey)
 	if session == nil {
@@ -84,17 +113,17 @@ func (e *Engine) handleQueuedMessageChoice(p Platform, msg *Message, id string, 
 		sessions.Save()
 		if err != nil {
 			slog.Warn("queued message steering unconfirmed; not replaying", "error", err)
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueSteerUnconfirmed))
+			e.finishQueuedMessageChoice(p, msg, queued, MsgQueueChoiceTitle, MsgQueueSteerUnconfirmed, "orange")
 		} else {
-			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgPsSent))
+			e.finishQueuedMessageChoice(p, msg, queued, MsgQueueSteerSent, MsgPsSent, "green")
 		}
 		return
 	}
 	if !e.restoreQueuedMessage(key, state, queued, predecessors) {
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceExpired))
+		e.finishQueuedMessageChoice(p, msg, queued, MsgQueueChoiceTitle, MsgQueueChoiceExpired, "grey")
 		return
 	}
-	e.reply(p, msg.ReplyCtx, e.i18n.T(MsgMessageQueued))
+	e.finishQueuedMessageChoice(p, msg, queued, MsgQueueKept, MsgMessageQueued, "blue")
 	if lockGen, locked := session.TryLock(); locked {
 		go e.drainOrphanedQueue(session, sessions, key, agent, workspace, lockGen)
 	}

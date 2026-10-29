@@ -208,6 +208,9 @@ const (
 	MsgNoExecution               MsgKey = "no_execution"
 	MsgPreviousProcessing        MsgKey = "previous_processing"
 	MsgQueueChoiceTitle          MsgKey = "queue_choice_title"
+	MsgQueueSteerPending         MsgKey = "queue_steer_pending"
+	MsgQueueSteerSent            MsgKey = "queue_steer_sent"
+	MsgQueueKept                 MsgKey = "queue_kept"
 	MsgQueueSteerButton          MsgKey = "queue_steer_button"
 	MsgQueueKeepButton           MsgKey = "queue_keep_button"
 	MsgQueueChoiceExpired        MsgKey = "queue_choice_expired"
@@ -821,6 +824,27 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "目前任務正在進行",
 		LangJapanese:           "タスクを実行中です",
 		LangSpanish:            "Hay una tarea en curso",
+	},
+	MsgQueueSteerPending: {
+		LangEnglish:            "Adding to the current task…",
+		LangChinese:            "正在补充当前任务…",
+		LangTraditionalChinese: "正在補充目前任務…",
+		LangJapanese:           "現在のタスクに追加しています…",
+		LangSpanish:            "Añadiendo a la tarea actual…",
+	},
+	MsgQueueSteerSent: {
+		LangEnglish:            "Added to the current task",
+		LangChinese:            "已补充到当前任务",
+		LangTraditionalChinese: "已補充到目前任務",
+		LangJapanese:           "現在のタスクに追加しました",
+		LangSpanish:            "Añadido a la tarea actual",
+	},
+	MsgQueueKept: {
+		LangEnglish:            "Kept in the queue",
+		LangChinese:            "已继续排队",
+		LangTraditionalChinese: "已繼續排隊",
+		LangJapanese:           "キューで待機します",
+		LangSpanish:            "Se mantiene en cola",
 	},
 	MsgQueueSteerButton: {
 		LangEnglish:            "Add to current task now",

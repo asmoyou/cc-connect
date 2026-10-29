@@ -82,7 +82,7 @@ func TestCUJ_C6_QueuedMessageDeliveryChoice(t *testing.T) {
 			name = "keep_queued"
 		}
 		t.Run(name, func(t *testing.T) {
-			p := &asyncInputPlatform{}
+			p := &queuedChoicePlatform{}
 			p.n = "test"
 			s := &asyncInputSession{events: make(chan Event, 16)}
 			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
@@ -94,10 +94,20 @@ func TestCUJ_C6_QueuedMessageDeliveryChoice(t *testing.T) {
 			})
 			const key = "test:shared-chat"
 			send := func(user, text string) {
-				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: user, UserName: user, Content: text, ReplyCtx: "ctx"})
+				e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: user, UserName: user, Content: text, ReplyCtx: "clicked-card"})
 			}
 			sentCount := func() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) }
-			visible := func(text string) bool { return strings.Contains(strings.Join(p.getSent(), "\n"), text) }
+			visible := func(text string) bool {
+				if strings.Contains(strings.Join(p.getSent(), "\n"), text) {
+					return true
+				}
+				for _, update := range p.getChoiceUpdates() {
+					if strings.Contains(update.card.RenderText(), text) {
+						return true
+					}
+				}
+				return false
+			}
 			send("author", "start held task")
 			waitAsyncInput(t, func() bool { return sentCount() == 1 })
 			send("author", "Use staging instead")
@@ -115,6 +125,15 @@ func TestCUJ_C6_QueuedMessageDeliveryChoice(t *testing.T) {
 			} else {
 				waitAsyncInput(t, func() bool { return visible(e.i18n.T(MsgPsSent)) })
 			}
+			updates := p.getChoiceUpdates()
+			if len(updates) == 0 {
+				t.Fatal("the original choice card was never updated")
+			}
+			status := MsgQueueSteerSent
+			if keep {
+				status = MsgQueueKept
+			}
+			assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(status), "Use staging instead")
 			send("author", steerAction) // replay, or attempt to undo the Keep decision
 			s.events <- Event{Type: EventResult, Content: "first task complete", Done: true}
 			waitAsyncInput(t, func() bool { return visible("first task complete") })

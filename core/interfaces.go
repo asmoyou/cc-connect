@@ -313,6 +313,13 @@ type CardSender interface {
 	ReplyCard(ctx context.Context, replyCtx any, card *Card) error
 }
 
+// CardActionUpdater replaces the specific card that generated replyCtx, rather
+// than the latest card in a session. It returns false for ordinary messages or
+// contexts without an action card, so callers can send a normal reply instead.
+type CardActionUpdater interface {
+	UpdateActionCard(ctx context.Context, replyCtx any, card *Card) (bool, error)
+}
+
 // CardNavigationHandler is called by platforms to render a card for in-place
 // card updates (e.g. Feishu card.action.trigger callback). The action string
 // uses prefixes like "nav:/model" or "act:/model 3".

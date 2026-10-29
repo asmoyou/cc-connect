@@ -62,6 +62,10 @@ func TestInteractivePlatform_QueuedSteeringCallbacks(t *testing.T) {
 				if message.Content != strings.TrimPrefix(action, "cmd:") || message.SessionKey != key || message.UserID != "ou_user" {
 					t.Fatalf("incorrect callback delivery: %#v", message)
 				}
+				rc, ok := message.ReplyCtx.(replyContext)
+				if !ok || !rc.cardAction || rc.messageID != "om_question" || rc.sessionKey != key {
+					t.Fatalf("callback lost the specific clicked card: %#v", message.ReplyCtx)
+				}
 			case <-time.After(time.Second):
 				t.Fatal("button did not dispatch to the engine")
 			}

@@ -63,7 +63,24 @@ func (p *interactivePlatform) RefreshCard(ctx context.Context, sessionKey string
 	if msgID == "" {
 		return fmt.Errorf("%s: no tracked card messageID for session %q", p.tag(), sessionKey)
 	}
+	return p.updateCardMessage(ctx, msgID, sessionKey, card)
+}
 
+// UpdateActionCard uses the immutable callback context so concurrent choices in
+// one chat cannot replace each other's cards. Never patch a typed command's
+// original user message.
+func (p *interactivePlatform) UpdateActionCard(ctx context.Context, rctx any, card *core.Card) (bool, error) {
+	rc, ok := rctx.(replyContext)
+	if !ok || !rc.cardAction || rc.messageID == "" {
+		return false, nil
+	}
+	if err := p.updateCardMessage(ctx, rc.messageID, rc.sessionKey, card); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (p *interactivePlatform) updateCardMessage(ctx context.Context, msgID, sessionKey string, card *core.Card) error {
 	cardJSON := renderCard(card, sessionKey)
 	req := larkim.NewPatchMessageReqBuilder().
 		MessageId(msgID).
