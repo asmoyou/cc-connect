@@ -37,7 +37,9 @@ jobs:
           files=$(gofmt -l core/queued_steering.go core/queued_steering_test.go core/cuj_test.go core/i18n.go core/interfaces.go platform/feishu/card.go platform/feishu/feishu.go platform/feishu/queued_steering_test.go platform/feishu/card_action_update_test.go)
           if [ -n "$files" ]; then
             printf '%s\n' "$files"
-            gofmt -d $files
+            while IFS= read -r file; do
+              gofmt -d "$file"
+            done <<< "$files"
             exit 1
           fi
       - name: Build web assets
