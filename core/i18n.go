@@ -211,6 +211,7 @@ const (
 	MsgQueueSteerPending         MsgKey = "queue_steer_pending"
 	MsgQueueSteerSent            MsgKey = "queue_steer_sent"
 	MsgQueueKept                 MsgKey = "queue_kept"
+	MsgQueueProcessing           MsgKey = "queue_processing"
 	MsgQueueSteerButton          MsgKey = "queue_steer_button"
 	MsgQueueKeepButton           MsgKey = "queue_keep_button"
 	MsgQueueChoiceExpired        MsgKey = "queue_choice_expired"
@@ -845,6 +846,13 @@ var messages = map[MsgKey]map[Language]string{
 		LangTraditionalChinese: "已繼續排隊",
 		LangJapanese:           "キューで待機します",
 		LangSpanish:            "Se mantiene en cola",
+	},
+	MsgQueueProcessing: {
+		LangEnglish:            "Processing queued message",
+		LangChinese:            "已开始处理排队消息",
+		LangTraditionalChinese: "已開始處理排隊訊息",
+		LangJapanese:           "待機中のメッセージを処理しています",
+		LangSpanish:            "Procesando el mensaje en cola",
 	},
 	MsgQueueSteerButton: {
 		LangEnglish:            "Add to current task now",

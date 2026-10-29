@@ -167,6 +167,68 @@ func TestCUJ_C6_QueuedMessageDeliveryChoice(t *testing.T) {
 			}
 		})
 	}
+	t.Run("automatic_without_click", func(t *testing.T) {
+		for _, legacyKeep := range []bool{false, true} {
+			name := "untouched"
+			if legacyKeep {
+				name = "legacy_keep"
+			}
+			t.Run(name, func(t *testing.T) {
+				p := &trackedQueuedChoicePlatform{}
+				p.n = "test"
+				s := &asyncInputSession{events: make(chan Event, 16)}
+				e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+				t.Cleanup(func() { _ = e.Stop() })
+				const key = "test:automatic"
+				send := func(text string) {
+					e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "author", Content: text, ReplyCtx: "user-message"})
+				}
+				sentCount := func() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) }
+				send("start held task")
+				waitAsyncInput(t, func() bool { return sentCount() == 1 })
+				send("first queued task")
+				first := waitForSentCard(t, &p.stubCardPlatform)
+				assertSingleQueuedChoice(t, first)
+				if legacyKeep {
+					send(queuedChoiceAction(t, first, true))
+				}
+				send("second queued task")
+				waitAsyncInput(t, func() bool { p.mu.Lock(); defer p.mu.Unlock(); return len(p.sentCards) == 2 })
+				p.mu.Lock()
+				second := p.sentCards[1]
+				p.mu.Unlock()
+				assertSingleQueuedChoice(t, second)
+
+				s.events <- Event{Type: EventResult, Content: "held task complete", Done: true}
+				waitAsyncInput(t, func() bool { return sentCount() == 2 })
+				updates := p.getChoiceUpdates()
+				if len(updates) == 0 || updates[len(updates)-1].card.Header.Title != e.i18n.T(MsgQueueProcessing) {
+					t.Fatal("automatically delivered card still has active choices")
+				}
+				latest := updates[len(updates)-1]
+				if latest.ctx != "sent-card-1" {
+					t.Fatalf("automatic delivery updated the wrong card: %v", latest.ctx)
+				}
+				assertClosedQueuedChoice(t, latest.card, e.i18n.T(MsgQueueProcessing), "first queued task")
+				send(queuedChoiceAction(t, first, false)) // stale callback must not duplicate delivery
+				s.events <- Event{Type: EventResult, Content: "first queued task complete", Done: true}
+				waitAsyncInput(t, func() bool { return sentCount() == 3 })
+				updates = p.getChoiceUpdates()
+				latest = updates[len(updates)-1]
+				if latest.ctx != "sent-card-2" {
+					t.Fatalf("second automatic delivery updated the wrong card: %v", latest.ctx)
+				}
+				assertClosedQueuedChoice(t, latest.card, e.i18n.T(MsgQueueProcessing), "second queued task")
+				s.events <- Event{Type: EventResult, Content: "all queued tasks complete", Done: true}
+				waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if len(s.sent) != 3 || len(s.steered) != 0 || !strings.Contains(s.sent[1], "first queued task") || !strings.Contains(s.sent[2], "second queued task") {
+					t.Fatalf("automatic delivery lost FIFO order or duplicated messages: %v / %v", s.sent, s.steered)
+				}
+			})
+		}
+	})
 }
 
 // A result can arrive before the steering acknowledgement. Neither a confirmed
