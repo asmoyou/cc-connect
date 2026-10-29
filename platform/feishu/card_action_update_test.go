@@ -7,11 +7,95 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/chenhg5/cc-connect/core"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 )
+
+func TestSendTrackedCard_UpdatesWithoutButtonCallback(t *testing.T) {
+	for _, scenario := range []string{"chat", "thread", "missing-id"} {
+		t.Run(scenario, func(t *testing.T) {
+			var sent atomic.Int32
+			patches := make(chan string, 1)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case strings.Contains(r.URL.Path, "/tenant_access_token/"):
+					writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "tracked-card-token"})
+				case r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages"):
+					sent.Add(1)
+					var body map[string]any
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					if scenario == "thread" {
+						if !strings.HasSuffix(r.URL.Path, "/om_user/reply") || body["reply_in_thread"] != true {
+							t.Errorf("tracked card lost its thread: %s %#v", r.URL.Path, body)
+						}
+					} else if r.URL.Path != "/open-apis/im/v1/messages" {
+						t.Errorf("unexpected tracked card route: %s", r.URL.Path)
+					}
+					id := "om_choice"
+					if scenario == "missing-id" {
+						id = ""
+					}
+					writeJSON(t, w, map[string]any{"code": 0, "data": map[string]any{"message_id": id}})
+				case r.Method == http.MethodPatch && r.URL.Path == "/open-apis/im/v1/messages/om_choice":
+					var body struct {
+						Content string `json:"content"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						t.Error(err)
+					}
+					patches <- body.Content
+					writeJSON(t, w, map[string]any{"code": 0})
+				default:
+					t.Errorf("unexpected tracked card request: %s %s", r.Method, r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer srv.Close()
+			platform, err := New(map[string]any{"app_id": "cli_tracked_" + scenario, "app_secret": "test", "thread_isolation": true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := platform.(*interactivePlatform)
+			p.domain = srv.URL
+			p.client = lark.NewClient(p.appID, p.appSecret, lark.WithOpenBaseUrl(srv.URL), lark.WithHttpClient(srv.Client()))
+			key := "feishu:oc_chat:ou_author"
+			if scenario == "thread" {
+				key = "feishu:oc_chat:root:om_thread"
+			}
+			initial := core.NewCard().Markdown("queued task").Buttons(core.PrimaryBtn("Add now", "cmd:/ps --queued one")).Build()
+			receipt, err := p.SendTrackedCard(context.Background(), replyContext{messageID: "om_user", chatID: "oc_chat", sessionKey: key}, initial)
+			if err != nil || sent.Load() != 1 {
+				t.Fatalf("tracked send failed or duplicated: err=%v sends=%d", err, sent.Load())
+			}
+			if scenario == "missing-id" {
+				if receipt != nil {
+					t.Fatal("missing bot message ID returned an unsafe update context")
+				}
+				return
+			}
+			p.cardActionMsgIDs = map[string]string{key: "om_unrelated"}
+			resolved := core.NewCard().Title("Processing queued message", "green").Markdown("queued task").Build()
+			updated, err := p.UpdateActionCard(context.Background(), receipt, resolved)
+			if !updated || err != nil {
+				t.Fatalf("unclicked card update failed: updated=%v err=%v", updated, err)
+			}
+			select {
+			case content := <-patches:
+				if !strings.Contains(content, "Processing queued message") || !strings.Contains(content, "queued task") || strings.Contains(content, `"tag":"button"`) {
+					t.Fatalf("automatic update retained its button or lost the message: %s", content)
+				}
+			default:
+				t.Fatal("card was not updated without a click")
+			}
+		})
+	}
+}
 
 func TestUpdateActionCard_ConcurrentChoicesPatchTheirOwnMessage(t *testing.T) {
 	type patch struct {

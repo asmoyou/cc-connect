@@ -3,24 +3,67 @@ package core
 import (
 	"crypto/rand"
 	"log/slog"
+	"sync"
 )
+
+// Shared by queue copies and button callbacks. Serialize updates so a delayed
+// Keep response cannot overwrite the status after automatic queue delivery.
+type queuedChoiceReceipt struct {
+	mu         sync.Mutex
+	replyCtx   any
+	processing bool
+}
 
 func newQueuedMessageID() string { return rand.Text() }
 
-func (e *Engine) sendQueuedMessageChoice(p Platform, replyCtx any, queued queuedMessage) {
+func (e *Engine) sendQueuedMessageChoice(p Platform, replyCtx any, queued queuedMessage) *queuedChoiceReceipt {
 	card := NewCard().Title(e.i18n.T(MsgQueueChoiceTitle), "blue").
 		Markdown(e.i18n.T(MsgMessageQueued)).
 		Markdown(truncateIf(queued.content, 240)).
 		Buttons(
 			PrimaryBtn(e.i18n.T(MsgQueueSteerButton), "cmd:/ps --queued "+queued.queueID),
-			DefaultBtn(e.i18n.T(MsgQueueKeepButton), "cmd:/ps --keep "+queued.queueID),
 		).Build()
+	if sender, ok := p.(TrackedCardSender); ok {
+		if err := e.waitOutgoing(p); err != nil {
+			slog.Warn("queued choice card send cancelled", "error", err)
+			return nil
+		}
+		ctx, err := sender.SendTrackedCard(e.ctx, replyCtx, e.renderCardForPlatform(p, card))
+		if err != nil {
+			slog.Warn("queued choice card send failed", "error", err)
+			e.reply(p, replyCtx, e.i18n.T(MsgMessageQueued))
+			return nil
+		}
+		if ctx != nil {
+			return &queuedChoiceReceipt{replyCtx: ctx}
+		}
+		return nil
+	}
 	e.sendWithCard(p, replyCtx, card)
+	return nil
+}
+
+func (e *Engine) markQueuedMessageProcessing(queued queuedMessage) {
+	if queued.choiceReceipt != nil {
+		e.updateQueuedMessageChoice(queued.platform, &Message{}, queued, MsgQueueProcessing, MsgQueueProcessing, "green")
+	}
 }
 
 // Only call after claiming the author's choice. Rejected or duplicate clicks
 // must not overwrite an in-flight or completed card with a different status.
 func (e *Engine) updateQueuedMessageChoice(p Platform, msg *Message, queued queuedMessage, title, detail MsgKey, color string) bool {
+	replyCtx := msg.ReplyCtx
+	if receipt := queued.choiceReceipt; receipt != nil {
+		receipt.mu.Lock()
+		defer receipt.mu.Unlock()
+		if receipt.processing && title != MsgQueueProcessing {
+			return true
+		}
+		if title == MsgQueueProcessing {
+			receipt.processing = true
+		}
+		replyCtx = receipt.replyCtx
+	}
 	updater, ok := p.(CardActionUpdater)
 	if !ok {
 		return false
@@ -31,7 +74,7 @@ func (e *Engine) updateQueuedMessageChoice(p Platform, msg *Message, queued queu
 		slog.Warn("queued choice card update cancelled", "error", err)
 		return false
 	}
-	updated, err := updater.UpdateActionCard(e.ctx, msg.ReplyCtx, e.renderCardForPlatform(p, card))
+	updated, err := updater.UpdateActionCard(e.ctx, replyCtx, e.renderCardForPlatform(p, card))
 	if err != nil {
 		slog.Warn("queued choice card update failed", "error", err)
 		return false
