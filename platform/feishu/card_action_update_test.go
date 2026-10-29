@@ -23,7 +23,7 @@ func TestUpdateActionCard_ConcurrentChoicesPatchTheirOwnMessage(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case r.URL.Path == "/open-apis/auth/v3/tenant_access_token/internal":
-			json.NewEncoder(w).Encode(map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-action-token"})
+			writeJSON(t, w, map[string]any{"code": 0, "expire": 7200, "tenant_access_token": "test-action-token"})
 		case r.Method == http.MethodPatch && strings.HasPrefix(r.URL.Path, "/open-apis/im/v1/messages/"):
 			var body struct {
 				Content string `json:"content"`
@@ -34,7 +34,7 @@ func TestUpdateActionCard_ConcurrentChoicesPatchTheirOwnMessage(t *testing.T) {
 				return
 			}
 			patches <- patch{path: r.URL.Path, content: body.Content}
-			json.NewEncoder(w).Encode(map[string]any{"code": 0, "msg": "success"})
+			writeJSON(t, w, map[string]any{"code": 0, "msg": "success"})
 		default:
 			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
