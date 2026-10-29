@@ -37,6 +37,7 @@ jobs:
           files=$(gofmt -l core/queued_steering.go core/queued_steering_test.go core/cuj_test.go core/i18n.go core/interfaces.go platform/feishu/card.go platform/feishu/feishu.go platform/feishu/queued_steering_test.go platform/feishu/card_action_update_test.go)
           if [ -n "$files" ]; then
             printf '%s\n' "$files"
+            gofmt -d $files
             exit 1
           fi
       - name: Build web assets
@@ -55,20 +56,20 @@ jobs:
       - name: Run critical user journeys and interaction race checks
         run: |
           go test ./core/ -run TestCUJ
-          go test -race ./core ./platform/feishu ./agent/codex -run 'TestQueuedSteering|TestCUJ_C6|TestInteractivePlatform_QueuedSteeringCallbacks|TestUpdateActionCard|TestAppServerSession_.*Idle'
+          go test -race ./core ./platform/feishu ./agent/codex -run 'TestQueuedSteering|TestCUJ_C6|TestInteractivePlatform_QueuedSteeringCallbacks|TestUpdateActionCard|TestSendTrackedCard|TestAppServerSession_.*Idle'
       - name: Confirm regression test detects the original bug
         run: |
           original=$(mktemp)
-          cp core/queued_steering.go "$original"
-          trap 'cp "$original" core/queued_steering.go; rm -f "$original"' EXIT
-          git show 8ff8d326:core/queued_steering.go > core/queued_steering.go
-          if go test ./core/ -run '^TestQueuedSteering_ReplacesClickedCardAndRemovesButtons$' > regression-before.log 2>&1; then
+          cp core/engine.go "$original"
+          trap 'cp "$original" core/engine.go; rm -f "$original"' EXIT
+          sed -i '/^[[:space:]]*e.markQueuedMessageProcessing(queued)$/d' core/engine.go
+          if go test ./core/ -run '^TestCUJ_C6_QueuedMessageDeliveryChoice/automatic_without_click$' > regression-before.log 2>&1; then
             cat regression-before.log
             echo 'Regression test unexpectedly passed before the fix'
             exit 1
           fi
           cat regression-before.log
-          grep -q 'got 0 card updates, want' regression-before.log
+          grep -q 'automatically delivered card still has active choices' regression-before.log
       - name: Build Mac arm64 binary
         env:
           GOOS: darwin
@@ -76,7 +77,7 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist/asmo
-          version=v1.5.1-beta.4.steering.2
+          version=v1.5.1-beta.4.steering.3
           commit=$(git rev-parse --short HEAD)
           built=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
           go build -tags goolm -ldflags "-s -w -X main.version=$version -X main.commit=$commit -X main.buildTime=$built" -o dist/asmo/cc-connect ./cmd/cc-connect
