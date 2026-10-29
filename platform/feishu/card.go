@@ -71,7 +71,7 @@ func (p *interactivePlatform) SendTrackedCard(ctx context.Context, rctx any, car
 		return nil, err
 	}
 	if id == "" {
-		slog.Warn(p.tag()+": card sent without message ID; automatic updates unavailable")
+		slog.Warn(p.tag() + ": card sent without message ID; automatic updates unavailable")
 		return nil, nil
 	}
 	return replyContext{messageID: id, chatID: rc.chatID, sessionKey: rc.sessionKey, cardAction: true}, nil
