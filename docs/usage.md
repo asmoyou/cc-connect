@@ -69,6 +69,21 @@ The next normal message after a long idle period starts in a fresh session autom
 
 To restore the previous behavior of always continuing, set `reset_on_idle_mins = 0`.
 
+### Choosing how to deliver a queued message
+
+When a task is running, text follow-ups stay queued by default. If the agent
+supports steering the active turn (currently Codex with `backend = "app_server"`)
+and the messaging platform supports interactive cards, the queue receipt offers
+**Add to current task now** and **Keep queued**. Only the author of that message
+can choose its delivery. Keeping it queued closes the choice; expired or repeated
+buttons cannot submit it again. Images and files retain ordinary queue delivery.
+
+Adding to the current task uses the adapter's native steering capability. It does
+not terminate a running tool. If the adapter confirms there is no active turn,
+the message returns to the ordinary queue. If delivery cannot be confirmed, the
+message is saved in history and an explicit notice is shown; it is not replayed
+automatically, because the agent may already have received it.
+
 ### Model switch preserves history
 
 `/model` preserves the current session — the agent resumes the conversation with the new model (no extra token cost). Model switching affects the shared agent instance — if multiple platforms use the same project, the model change applies to all of them.

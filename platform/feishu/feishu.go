@@ -108,6 +108,7 @@ func init() {
 
 type replyContext struct {
 	messageID        string
+	cardAction       bool // messageID identifies the clicked card, not a user message
 	chatID           string
 	sessionKey       string
 	bootstrapThread  bool
@@ -964,7 +965,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
 	// cmd: — async command dispatch, with optional in-place card replacement
 	if strings.HasPrefix(actionVal, "cmd:") {
 		cmdText := strings.TrimPrefix(actionVal, "cmd:")
-		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey}
+		rctx := replyContext{messageID: messageID, chatID: chatID, sessionKey: sessionKey, cardAction: true}
 
 		slog.Info(p.tag()+": card action dispatched as command", "cmd", cmdText, "user", userID)
 
