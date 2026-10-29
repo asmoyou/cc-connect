@@ -1,3 +1,5 @@
+> **Asmo fork:** Prebuilt Linux ARM64 and macOS Apple Silicon downloads are available from our [preview release](https://github.com/asmoyou/cc-connect/releases/tag/asmo-latest). See [installation instructions](docs/asmo-builds.md) for this fork; the npm package below installs the upstream version.
+
 <p align="center">
   <img src="./docs/images/banner.svg" alt="CC-Connect Banner" width="800"/>
 </p>

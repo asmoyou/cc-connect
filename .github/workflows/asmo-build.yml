@@ -1,8 +1,9 @@
-name: Asmo validation and Mac build
+name: Asmo validation and release builds
 
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -72,22 +73,107 @@ jobs:
           fi
           cat regression-before.log
           grep -q 'automatically delivered card still has active choices' regression-before.log
-      - name: Build Mac arm64 binary
+      - name: Build and package Mac and Linux arm64 binaries
         env:
-          GOOS: darwin
           GOARCH: arm64
           CGO_ENABLED: '0'
         run: |
-          mkdir -p dist/asmo
+          set -euo pipefail
+          mkdir -p dist/asmo/release
           version=v1.5.1-beta.4.steering.3
           commit=$(git rev-parse --short HEAD)
           built=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
-          go build -tags goolm -ldflags "-s -w -X main.version=$version -X main.commit=$commit -X main.buildTime=$built" -o dist/asmo/cc-connect ./cmd/cc-connect
-          cd dist/asmo
-          shasum -a 256 cc-connect > SHA256SUMS
+          for target in darwin linux; do
+            target_dir="dist/asmo/$target-arm64"
+            mkdir -p "$target_dir"
+            GOOS="$target" go build -tags goolm -ldflags "-s -w -X main.version=$version -X main.commit=$commit -X main.buildTime=$built" -o "$target_dir/cc-connect" ./cmd/cc-connect
+            (cd "$target_dir" && sha256sum cc-connect > SHA256SUMS)
+            tar -czf "dist/asmo/release/cc-connect-$target-arm64.tar.gz" -C "$target_dir" cc-connect SHA256SUMS
+          done
+          (cd dist/asmo/release && sha256sum ./*.tar.gz > SHA256SUMS)
       - uses: actions/upload-artifact@v4
         with:
           name: cc-connect-darwin-arm64-${{ github.sha }}
-          path: dist/asmo/
+          path: dist/asmo/darwin-arm64/
           retention-days: 14
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cc-connect-linux-arm64-${{ github.sha }}
+          path: dist/asmo/linux-arm64/
+          retention-days: 14
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: asmo-release-assets-${{ github.sha }}
+          path: dist/asmo/release/
+          retention-days: 14
+          if-no-files-found: error
+
+  linux-arm64-smoke:
+    needs: validate-and-build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: asmo-release-assets-${{ github.sha }}
+          path: dist
+      - name: Verify and run the release archive on Ubuntu ARM64
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(uname -m)" = aarch64
+          cd dist
+          sha256sum --check SHA256SUMS
+          mkdir extracted
+          tar -xzf cc-connect-linux-arm64.tar.gz -C extracted
+          cd extracted
+          sha256sum --check SHA256SUMS
+          test -x cc-connect
+          file cc-connect | grep 'ARM aarch64'
+          ./cc-connect --version | tee version.txt
+          grep -F "${EXPECTED_SHA:0:7}" version.txt
+          ./cc-connect --help
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: [validate-and-build, linux-arm64-smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: asmo-release-assets-${{ github.sha }}
+          path: dist
+      - name: Publish the fork's rolling preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BUILD_SHA: ${{ github.sha }}
+          BUILD_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          (cd dist && sha256sum --check SHA256SUMS)
+          cat > release-notes.md <<EOF
+          Fork build of cc-connect v1.5.1-beta.4.steering.3, including queued-message card improvements.
+
+          Commit: $BUILD_SHA
+          Build and checks: $BUILD_RUN_URL
+
+          Downloads: macOS Apple Silicon (darwin/arm64) and Linux ARM64 (Ubuntu aarch64).
+          Each archive contains the executable and its SHA256SUMS. Linux ARM64 was run on a native Ubuntu ARM runner.
+
+          This rolling preview is replaced after successful main builds. Official npm and cc-connect update commands still use the upstream repository.
+          Installation: https://github.com/asmoyou/cc-connect/blob/main/docs/asmo-builds.md
+          EOF
+          if gh release view asmo-latest >/dev/null 2>&1; then
+            gh release upload asmo-latest dist/* --clobber
+            gh api --method PATCH "repos/$GH_REPO/git/refs/tags/asmo-latest" -f sha="$BUILD_SHA" -F force=true
+            gh release edit asmo-latest --title 'Asmo latest preview (macOS and Linux ARM64)' --notes-file release-notes.md --prerelease
+          else
+            gh release create asmo-latest dist/* --target "$BUILD_SHA" --title 'Asmo latest preview (macOS and Linux ARM64)' --notes-file release-notes.md --prerelease
+          fi

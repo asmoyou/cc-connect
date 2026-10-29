@@ -1,3 +1,5 @@
+> **Asmo fork：** 我们的 [预览版 Release](https://github.com/asmoyou/cc-connect/releases/tag/asmo-latest) 提供 Linux ARM64 和 macOS Apple Silicon 成品，无需编译。请按 [fork 安装说明](docs/asmo-builds.md) 安装；下文 npm 包安装的是官方版本。
+
 <p align="center">
   <img src="./docs/images/banner.svg" alt="CC-Connect Banner" width="800"/>
 </p>
