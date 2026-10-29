@@ -2,7 +2,7 @@ name: Asmo validation and Mac build
 
 on:
   push:
-    branches: [main, asmo/queued-message-steering]
+    branches: [main]
 
 permissions:
   contents: read
