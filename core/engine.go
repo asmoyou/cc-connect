@@ -485,6 +485,10 @@ type Engine struct {
 	interactiveMu     sync.Mutex
 	interactiveStates map[string]*interactiveState // key = sessionKey
 
+	queuedChoicesMu   sync.Mutex
+	queuedChoices     map[string]*queuedChoiceReceipt
+	queuedChoiceOrder []string
+
 	// Teardown tracking. A session's state is removed from interactiveStates
 	// as soon as /stop is issued, but its OS process can live on for up to
 	// closeTimeout while it drains stdin and runs Stop hooks. Without the two
@@ -2648,17 +2652,18 @@ func (e *Engine) removeQueuedMessageByID(messageID string) (string, bool) {
 			continue
 		}
 		filtered := pending[:0]
-		removed := false
+		var removed []queuedMessage
 		for _, queued := range pending {
 			if queued.messageID == messageID {
-				removed = true
+				removed = append(removed, queued)
 				continue
 			}
 			filtered = append(filtered, queued)
 		}
-		if removed {
+		if len(removed) > 0 {
 			state.pendingMessages = filtered
 			state.mu.Unlock()
+			e.closeQueuedMessageCards(removed)
 			return sessionKey, true
 		}
 		state.mu.Unlock()
@@ -6641,15 +6646,15 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 			// Check for queued messages — if present, continue the event loop
 			// for the next turn instead of returning.
 			state.mu.Lock()
-			droppedStale := 0
+			var droppedStale []queuedMessage
 			for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+				droppedStale = append(droppedStale, state.pendingMessages[0])
 				state.pendingMessages = state.pendingMessages[1:]
-				droppedStale++
 			}
-			if droppedStale > 0 {
+			if len(droppedStale) > 0 {
 				slog.Info("dropped stale queued user messages after completed turn",
 					"session", sessionKey,
-					"dropped", droppedStale,
+					"dropped", len(droppedStale),
 				)
 			}
 			if len(state.pendingMessages) > 0 {
@@ -6662,6 +6667,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				state.fromVoice = queued.fromVoice
 				state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 				state.mu.Unlock()
+				e.closeQueuedMessageCards(droppedStale)
 				e.markQueuedMessageProcessing(queued)
 
 				// Stop the previous turn's typing indicator
@@ -6783,6 +6789,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				continue
 			}
 			state.mu.Unlock()
+			e.closeQueuedMessageCards(droppedStale)
 
 			if pendingSend != nil {
 				if err := <-pendingSend; err != nil {
@@ -6976,6 +6983,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
 	remaining := state.pendingMessages
 	state.pendingMessages = nil
 	state.mu.Unlock()
+	e.closeQueuedMessageCards(remaining)
 	for _, q := range remaining {
 		e.send(q.platform, q.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), reason))
 	}
@@ -6993,20 +7001,21 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 			state.mu.Unlock()
 			return true
 		}
-		droppedStale := 0
+		var droppedStale []queuedMessage
 		for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+			droppedStale = append(droppedStale, state.pendingMessages[0])
 			state.pendingMessages = state.pendingMessages[1:]
-			droppedStale++
 		}
-		if droppedStale > 0 {
+		if len(droppedStale) > 0 {
 			slog.Info("dropped stale queued user messages while draining",
 				"session", sessionKey,
-				"dropped", droppedStale,
+				"dropped", len(droppedStale),
 			)
 		}
 		if len(state.pendingMessages) == 0 {
 			session.Unlock(lockGen)
 			state.mu.Unlock()
+			e.closeQueuedMessageCards(droppedStale)
 			return true
 		}
 		queued := state.pendingMessages[0]
@@ -7017,7 +7026,7 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		state.fromVoice = queued.fromVoice
 		state.currentTurnUserMessageTimeMs = queued.userMessageTimeMs
 		state.mu.Unlock()
-		e.markQueuedMessageProcessing(queued)
+		e.closeQueuedMessageCards(droppedStale)
 
 		e.i18n.DetectAndSet(queued.content)
 		prompt := e.buildSenderPrompt(queued.content, queued.userID, queued.userName, queued.msgPlatform, queued.msgSessionKey, queued.channelKey)
@@ -7026,11 +7035,13 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
 		as := state.agentSession // capture under lock to avoid race with cleanup (mirrors #1436)
 		state.mu.Unlock()
 		if as == nil || !as.Alive() {
+			e.closeQueuedMessageCards([]queuedMessage{queued})
 			e.send(queued.platform, queued.replyCtx, fmt.Sprintf(e.i18n.T(MsgError), "agent session ended"))
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("agent session ended"))
 			return false
 		}
 
+		e.markQueuedMessageProcessing(queued)
 		drainEvents(as.Events())
 
 		session.AddHistory("user", queued.content)
@@ -10996,9 +11007,7 @@ func (e *Engine) stopInteractiveSessionWithOptions(sessionKey string, notifyQueu
 		if notifyQueued {
 			e.notifyDroppedQueuedMessages(state, fmt.Errorf("session cancelled"))
 		} else {
-			state.mu.Lock()
-			state.pendingMessages = nil
-			state.mu.Unlock()
+			e.discardQueuedMessages(state)
 		}
 
 		// Mark eventsNeedResync so the next turn drains stale events from
@@ -11042,9 +11051,7 @@ normalCleanup:
 	if notifyQueued {
 		e.notifyDroppedQueuedMessages(state, fmt.Errorf("session reset"))
 	} else {
-		state.mu.Lock()
-		state.pendingMessages = nil
-		state.mu.Unlock()
+		e.discardQueuedMessages(state)
 	}
 	e.closeAgentSessionAsync(sessionKey, agentSession, closePlatform, closeReplyCtx)
 

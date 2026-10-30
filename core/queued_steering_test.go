@@ -65,7 +65,7 @@ func TestQueuedSteering_LateKeepDoesNotOverwriteAutomaticDelivery(t *testing.T) 
 	p := &trackedQueuedChoicePlatform{}
 	p.n = "test"
 	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
-	queued := queuedMessage{platform: p, content: "queued task", choiceReceipt: &queuedChoiceReceipt{replyCtx: "sent-card-1"}}
+	queued := queuedMessage{platform: p, content: "queued task", choiceReceipt: &queuedChoiceReceipt{replyCtx: "sent-card-1", platform: p, content: "queued task"}}
 	e.markQueuedMessageProcessing(queued)
 	e.finishQueuedMessageChoice(p, &Message{ReplyCtx: "clicked-card"}, queued, MsgQueueKept, MsgMessageQueued, "blue")
 	updates := p.getChoiceUpdates()
@@ -159,6 +159,7 @@ func TestQueuedSteering_ReplacesClickedCardAndRemovesButtons(t *testing.T) {
 			p.n = "test"
 			s := &queuedSteeringSession{asyncInputSession: asyncInputSession{events: make(chan Event, 8), active: true}}
 			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
 			const key = "test:chat:user"
 			session := e.sessions.GetOrCreateActive(key)
 			gen, _ := session.TryLock()
@@ -442,5 +443,119 @@ func TestQueuedSteering_UnsupportedAndAttachmentMessagesRetainQueueReceipt(t *te
 				t.Fatal("ordinary queue lost the message")
 			}
 		})
+	}
+}
+
+func TestQueuedSteering_RemovalRetiresCards(t *testing.T) {
+	for _, mode := range []string{"recall", "session_ended", "silent_stop", "stale_drain", "dead_agent"} {
+		t.Run(mode, func(t *testing.T) {
+			p := &trackedQueuedChoicePlatform{}
+			p.n = "test"
+			s := &asyncInputSession{events: make(chan Event, 8), active: true}
+			e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+			const key = "test:removed"
+			session := e.sessions.GetOrCreateActive(key)
+			gen, _ := session.TryLock()
+			state := &interactiveState{agentSession: s, busySession: session}
+			e.interactiveStates[key] = state
+			e.queueMessageForBusySession(p, &Message{SessionKey: key, UserID: "author", Content: "queued task", MessageID: "original", ReplyCtx: "user-message", UserMessageTimeMs: 10}, key)
+			switch mode {
+			case "recall":
+				if _, ok := e.removeQueuedMessageByID("original"); !ok {
+					t.Fatal("recall failed")
+				}
+			case "session_ended":
+				e.notifyDroppedQueuedMessages(state, errors.New("agent ended"))
+			case "silent_stop":
+				e.stopInteractiveSessionSilently(key)
+			case "stale_drain":
+				state.lastCompletedUserMessageTimeMs = 20
+				e.drainPendingMessages(state, session, e.sessions, key, gen)
+			case "dead_agent":
+				_ = s.Close()
+				e.drainPendingMessages(state, session, e.sessions, key, gen)
+			}
+			updates := p.getChoiceUpdates()
+			if len(updates) != 1 || updates[0].ctx != "sent-card-1" {
+				t.Fatalf("removed queue card was not retired: %#v", updates)
+			}
+			assertClosedQueuedChoice(t, updates[0].card, e.i18n.T(MsgQueueRemoved), "queued task")
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			if len(s.sent) != 0 || len(s.steered) != 0 {
+				t.Fatal("removed message was sent")
+			}
+		})
+	}
+}
+
+func TestQueuedSteering_ExpiredCallbackRepairsCard(t *testing.T) {
+	for _, mode := range []string{"processed", "other_user", "other_chat", "previous_process", "typed_command"} {
+		t.Run(mode, func(t *testing.T) {
+			p := &trackedQueuedChoicePlatform{}
+			p.n = "test"
+			e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+			t.Cleanup(func() { _ = e.Stop() })
+			q := queuedMessage{queueID: "one", platform: p, userID: "author", msgSessionKey: "test:chat", content: "queued task"}
+			q.choiceReceipt = e.sendQueuedMessageChoice(p, "user-message", q)
+			p.mu.Lock()
+			p.updateErr = errors.New("card API unavailable")
+			p.mu.Unlock()
+			e.markQueuedMessageProcessing(q)
+			p.mu.Lock()
+			p.updateErr = nil
+			p.mu.Unlock()
+			msg := &Message{SessionKey: "test:chat", UserID: "author", ReplyCtx: "clicked-card"}
+			id := "one"
+			switch mode {
+			case "other_user":
+				msg.UserID = "stranger"
+			case "other_chat":
+				msg.SessionKey = "test:other"
+			case "previous_process":
+				id = "old-process-id"
+			case "typed_command":
+				id = "old-process-id"
+				msg.ReplyCtx = "user-message"
+			}
+			e.handleQueuedMessageChoice(p, msg, id, false)
+			updates := p.getChoiceUpdates()
+			if mode == "other_user" || mode == "other_chat" || mode == "typed_command" {
+				if len(updates) != 0 {
+					t.Fatal("unauthorized or typed callback modified a card")
+				}
+				return
+			}
+			if len(updates) != 1 {
+				t.Fatalf("stale button did not repair card: %v", updates)
+			}
+			status, content := MsgQueueProcessing, "queued task"
+			if mode == "previous_process" {
+				status, content = MsgQueueChoiceExpired, ""
+			}
+			assertClosedQueuedChoice(t, updates[0].card, e.i18n.T(status), content)
+		})
+	}
+}
+
+func TestQueuedSteering_RetryUsesLatestStatus(t *testing.T) {
+	p := &trackedQueuedChoicePlatform{}
+	p.n = "test"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	q := queuedMessage{queueID: "one", platform: p, userID: "author", msgSessionKey: "test:chat", content: "queued task"}
+	q.choiceReceipt = e.sendQueuedMessageChoice(p, "user-message", q)
+	p.mu.Lock()
+	p.updateErr = errors.New("temporary failure")
+	p.mu.Unlock()
+	e.finishQueuedMessageChoice(p, &Message{}, q, MsgQueueKept, MsgMessageQueued, "blue")
+	e.markQueuedMessageProcessing(q)
+	p.mu.Lock()
+	p.updateErr = nil
+	p.mu.Unlock()
+	waitAsyncInput(t, func() bool { return len(p.getChoiceUpdates()) > 0 })
+	for _, update := range p.getChoiceUpdates() {
+		assertClosedQueuedChoice(t, update.card, e.i18n.T(MsgQueueProcessing), "queued task")
 	}
 }

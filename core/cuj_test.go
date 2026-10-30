@@ -229,6 +229,72 @@ func TestCUJ_C6_QueuedMessageDeliveryChoice(t *testing.T) {
 			})
 		}
 	})
+	t.Run("automatic_card_update_recovers", func(t *testing.T) {
+		p := &trackedQueuedChoicePlatform{}
+		p.n = "test"
+		s := &asyncInputSession{events: make(chan Event, 16)}
+		e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+		t.Cleanup(func() { _ = e.Stop() })
+		const key = "test:card-recovery"
+		send := func(text string) {
+			e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "author", Content: text, ReplyCtx: "clicked-card"})
+		}
+		sentCount := func() int { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) }
+		send("held task")
+		waitAsyncInput(t, func() bool { return sentCount() == 1 })
+		send("queued task")
+		card := waitForSentCard(t, &p.stubCardPlatform)
+		p.mu.Lock()
+		p.updateErr = fmt.Errorf("temporary card API failure")
+		p.mu.Unlock()
+		s.events <- Event{Type: EventResult, Content: "held task complete", Done: true}
+		waitAsyncInput(t, func() bool { return sentCount() == 2 })
+		if len(p.getChoiceUpdates()) != 0 {
+			t.Fatal("card update did not fail as arranged")
+		}
+		p.mu.Lock()
+		p.updateErr = nil
+		p.mu.Unlock()
+		waitAsyncInput(t, func() bool { return len(p.getChoiceUpdates()) > 0 })
+		updates := p.getChoiceUpdates()
+		assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(MsgQueueProcessing), "queued task")
+		send(queuedChoiceAction(t, card, false))
+		s.events <- Event{Type: EventResult, Content: "queued task complete", Done: true}
+		waitAsyncInput(t, func() bool { return !e.sessions.GetOrCreateActive(key).Busy() })
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if len(s.sent) != 2 || len(s.steered) != 0 {
+			t.Fatalf("card recovery replayed input: sent=%v, steered=%v", s.sent, s.steered)
+		}
+	})
+
+	t.Run("stopped_queue_closes_card", func(t *testing.T) {
+		p := &trackedQueuedChoicePlatform{}
+		p.n = "test"
+		s := &asyncInputSession{events: make(chan Event, 16)}
+		e := NewEngine("test", &controllableAgent{nextSession: s}, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
+		t.Cleanup(func() { _ = e.Stop() })
+		const key = "test:stop-card"
+		send := func(text string) {
+			e.ReceiveMessage(p, &Message{SessionKey: key, Platform: "test", UserID: "author", Content: text, ReplyCtx: "clicked-card"})
+		}
+		send("held task")
+		waitAsyncInput(t, func() bool { s.mu.Lock(); defer s.mu.Unlock(); return len(s.sent) == 1 })
+		send("queued task")
+		card := waitForSentCard(t, &p.stubCardPlatform)
+		send("/stop")
+		waitAsyncInput(t, func() bool { return len(p.getChoiceUpdates()) > 0 })
+		updates := p.getChoiceUpdates()
+		assertClosedQueuedChoice(t, updates[len(updates)-1].card, e.i18n.T(MsgQueueRemoved), "queued task")
+		send(queuedChoiceAction(t, card, false))
+		waitAsyncInput(t, func() bool { return strings.Contains(strings.Join(p.getSent(), "\n"), e.i18n.T(MsgQueueRemoved)) })
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if len(s.sent) != 1 || len(s.steered) != 0 {
+			t.Fatal("stopped message was delivered by an old button")
+		}
+	})
+
 }
 
 // A result can arrive before the steering acknowledgement. Neither a confirmed
