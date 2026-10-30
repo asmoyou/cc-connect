@@ -85,6 +85,12 @@ cards, automatic delivery replaces the original receipt with a processing status
 and removes the button. Expired or repeated callbacks cannot submit it again.
 Images and files retain ordinary queue delivery.
 
+Card update failures are retried without resending the queued input. Removing a
+message from the queue (for example, recalling it or stopping the session) also
+closes its card. Clicking an old button repairs the displayed status instead of
+resubmitting the task. After a restart, an expired card is closed on its next
+click; its exact previous delivery status may no longer be available.
+
 Adding to the current task uses the adapter's native steering capability. It does
 not terminate a running tool. If the adapter confirms there is no active turn,
 the message returns to the ordinary queue. If delivery cannot be confirmed, the

@@ -4,14 +4,55 @@ import (
 	"crypto/rand"
 	"log/slog"
 	"sync"
+	"time"
 )
 
 // Shared by queue copies and button callbacks. Serialize updates so a delayed
 // Keep response cannot overwrite the status after automatic queue delivery.
 type queuedChoiceReceipt struct {
-	mu         sync.Mutex
-	replyCtx   any
-	processing bool
+	mu               sync.Mutex
+	replyCtx         any
+	processing       bool
+	title, detail    MsgKey
+	color            string
+	synced, retrying bool
+	// Immutable ownership and display data, retained briefly after dequeue so
+	// an old callback can repair the card without submitting input again.
+	platform                    Platform
+	userID, sessionKey, content string
+}
+
+// Bound memory independently of message history. Pending entries also own their
+// receipt, so evicting an old lookup never prevents automatic status updates.
+func (e *Engine) rememberQueuedChoice(id string, receipt *queuedChoiceReceipt) {
+	if id == "" {
+		return
+	}
+	e.queuedChoicesMu.Lock()
+	defer e.queuedChoicesMu.Unlock()
+	if e.queuedChoices == nil {
+		e.queuedChoices = make(map[string]*queuedChoiceReceipt)
+	}
+	if _, exists := e.queuedChoices[id]; exists {
+		return
+	}
+	if len(e.queuedChoiceOrder) >= 512 {
+		delete(e.queuedChoices, e.queuedChoiceOrder[0])
+		e.queuedChoiceOrder = e.queuedChoiceOrder[1:]
+	}
+	e.queuedChoices[id] = receipt
+	e.queuedChoiceOrder = append(e.queuedChoiceOrder, id)
+}
+
+func newQueuedChoiceReceipt(p Platform, msg *Message, queued queuedMessage) *queuedChoiceReceipt {
+	user, session := queued.userID, queued.msgSessionKey
+	if user == "" {
+		user = msg.UserID
+	}
+	if session == "" {
+		session = msg.SessionKey
+	}
+	return &queuedChoiceReceipt{platform: p, userID: user, sessionKey: session, content: truncateIf(queued.content, 240)}
 }
 
 func newQueuedMessageID() string { return rand.Text() }
@@ -35,7 +76,10 @@ func (e *Engine) sendQueuedMessageChoice(p Platform, replyCtx any, queued queued
 			return nil
 		}
 		if ctx != nil {
-			return &queuedChoiceReceipt{replyCtx: ctx}
+			receipt := newQueuedChoiceReceipt(p, &Message{}, queued)
+			receipt.replyCtx = ctx
+			e.rememberQueuedChoice(queued.queueID, receipt)
+			return receipt
 		}
 		return nil
 	}
@@ -52,34 +96,113 @@ func (e *Engine) markQueuedMessageProcessing(queued queuedMessage) {
 // Only call after claiming the author's choice. Rejected or duplicate clicks
 // must not overwrite an in-flight or completed card with a different status.
 func (e *Engine) updateQueuedMessageChoice(p Platform, msg *Message, queued queuedMessage, title, detail MsgKey, color string) bool {
-	replyCtx := msg.ReplyCtx
-	if receipt := queued.choiceReceipt; receipt != nil {
-		receipt.mu.Lock()
-		defer receipt.mu.Unlock()
-		if receipt.processing && title != MsgQueueProcessing {
-			return true
-		}
-		if title == MsgQueueProcessing {
-			receipt.processing = true
-		}
-		replyCtx = receipt.replyCtx
+	receipt := queued.choiceReceipt
+	if receipt == nil {
+		receipt = newQueuedChoiceReceipt(p, msg, queued)
+		receipt.replyCtx = msg.ReplyCtx
+		e.rememberQueuedChoice(queued.queueID, receipt)
 	}
-	updater, ok := p.(CardActionUpdater)
-	if !ok {
+	receipt.mu.Lock()
+	defer receipt.mu.Unlock()
+	if receipt.processing && title != MsgQueueProcessing {
+		return receipt.synced
+	}
+	if title == MsgQueueProcessing {
+		receipt.processing = true
+	}
+	if receipt.title != title || receipt.detail != detail || receipt.color != color {
+		receipt.title, receipt.detail, receipt.color = title, detail, color
+		receipt.synced = false
+	}
+	return e.syncQueuedChoiceLocked(receipt)
+}
+
+// receipt.mu serializes both callback and automatic updates. Retries always
+// render the latest desired state, never the snapshot from a failed request.
+func (e *Engine) syncQueuedChoiceLocked(receipt *queuedChoiceReceipt) bool {
+	if receipt.synced {
+		return true
+	}
+	updater, ok := receipt.platform.(CardActionUpdater)
+	if !ok || receipt.replyCtx == nil {
 		return false
 	}
-	card := NewCard().Title(e.i18n.T(title), color).
-		Markdown(e.i18n.T(detail)).Markdown(truncateIf(queued.content, 240)).Build()
-	if err := e.waitOutgoing(p); err != nil {
-		slog.Warn("queued choice card update cancelled", "error", err)
+	card := NewCard().Title(e.i18n.T(receipt.title), receipt.color).
+		Markdown(e.i18n.T(receipt.detail)).Markdown(receipt.content).Build()
+	if err := e.waitOutgoing(receipt.platform); err != nil {
 		return false
 	}
-	updated, err := updater.UpdateActionCard(e.ctx, replyCtx, e.renderCardForPlatform(p, card))
+	updated, err := updater.UpdateActionCard(e.ctx, receipt.replyCtx, e.renderCardForPlatform(receipt.platform, card))
 	if err != nil {
 		slog.Warn("queued choice card update failed", "error", err)
+		if !receipt.retrying && e.ctx.Err() == nil {
+			receipt.retrying = true
+			go e.retryQueuedChoice(receipt)
+		}
 		return false
 	}
+	receipt.synced = updated
 	return updated
+}
+
+func (e *Engine) retryQueuedChoice(receipt *queuedChoiceReceipt) {
+	delays := []time.Duration{250 * time.Millisecond, time.Second, 3 * time.Second, 10 * time.Second, 30 * time.Second}
+	for i, delay := range delays {
+		timer := time.NewTimer(delay)
+		select {
+		case <-e.ctx.Done():
+			timer.Stop()
+			receipt.mu.Lock()
+			receipt.retrying = false
+			receipt.mu.Unlock()
+			return
+		case <-timer.C:
+		}
+		receipt.mu.Lock()
+		done := e.syncQueuedChoiceLocked(receipt)
+		if done || i == len(delays)-1 {
+			receipt.retrying = false
+		}
+		receipt.mu.Unlock()
+		if done {
+			return
+		}
+	}
+}
+
+func (e *Engine) closeQueuedMessageCards(queued []queuedMessage) {
+	for _, q := range queued {
+		if q.choiceReceipt != nil {
+			e.updateQueuedMessageChoice(q.platform, &Message{}, q, MsgQueueRemoved, MsgQueueRemoved, "grey")
+		}
+	}
+}
+
+// A callback may arrive after drain, cancellation, eviction, or restart. Only
+// repair the receipt; queue absence must never cause input to be resubmitted.
+func (e *Engine) handleExpiredQueuedChoice(p Platform, msg *Message, id string) {
+	e.queuedChoicesMu.Lock()
+	receipt := e.queuedChoices[id]
+	e.queuedChoicesMu.Unlock()
+	if receipt != nil {
+		if msg.UserID == "" || receipt.userID != msg.UserID || receipt.sessionKey != msg.SessionKey || receipt.platform != p {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceExpired))
+			return
+		}
+		receipt.mu.Lock()
+		detail := receipt.detail
+		if detail != "" {
+			e.syncQueuedChoiceLocked(receipt)
+		}
+		receipt.mu.Unlock()
+		if detail != "" {
+			e.reply(p, msg.ReplyCtx, e.i18n.T(detail))
+			return
+		}
+	}
+	// For cards from an earlier process, only an adapter-validated card
+	// callback can update the clicked bot message. Typed commands cannot.
+	e.finishQueuedMessageChoice(p, msg, queuedMessage{}, MsgQueueChoiceTitle, MsgQueueChoiceExpired, "grey")
 }
 
 func (e *Engine) finishQueuedMessageChoice(p Platform, msg *Message, queued queuedMessage, title, detail MsgKey, color string) {
@@ -97,22 +220,36 @@ func (e *Engine) handleQueuedMessageChoice(p Platform, msg *Message, id string, 
 	state := e.interactiveStates[key]
 	if state == nil {
 		e.interactiveMu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceExpired))
+		e.handleExpiredQueuedChoice(p, msg, id)
 		return
 	}
 	state.mu.Lock()
 	e.interactiveMu.Unlock()
 	index := -1
 	for i, queued := range state.pendingMessages {
-		if queued.queueID == id && !queued.queueChoiceClosed && msg.UserID != "" && queued.userID == msg.UserID {
-			index = i
-			break
+		if queued.queueID != id {
+			continue
 		}
+		if msg.UserID == "" || queued.userID != msg.UserID {
+			state.mu.Unlock()
+			e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceExpired))
+			return
+		}
+		if !queued.queueChoiceClosed {
+			index = i
+		}
+		break
 	}
 	if index < 0 || state.stopped {
 		state.mu.Unlock()
-		e.reply(p, msg.ReplyCtx, e.i18n.T(MsgQueueChoiceExpired))
+		e.handleExpiredQueuedChoice(p, msg, id)
 		return
+	}
+	if state.pendingMessages[index].choiceReceipt == nil {
+		receipt := newQueuedChoiceReceipt(p, msg, state.pendingMessages[index])
+		receipt.replyCtx = msg.ReplyCtx
+		state.pendingMessages[index].choiceReceipt = receipt
+		e.rememberQueuedChoice(id, receipt)
 	}
 	if keep {
 		state.pendingMessages[index].queueChoiceClosed = true
@@ -196,4 +333,13 @@ func (e *Engine) restoreQueuedMessage(key string, state *interactiveState, queue
 	copy(state.pendingMessages[index+1:], state.pendingMessages[index:])
 	state.pendingMessages[index] = queued
 	return true
+}
+
+// Used by silent session transitions: retire receipts without extra messages.
+func (e *Engine) discardQueuedMessages(state *interactiveState) {
+	state.mu.Lock()
+	pending := state.pendingMessages
+	state.pendingMessages = nil
+	state.mu.Unlock()
+	e.closeQueuedMessageCards(pending)
 }
