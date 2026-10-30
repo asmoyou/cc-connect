@@ -559,3 +559,20 @@ func TestQueuedSteering_RetryUsesLatestStatus(t *testing.T) {
 		assertClosedQueuedChoice(t, update.card, e.i18n.T(MsgQueueProcessing), "queued task")
 	}
 }
+
+func TestQueuedSteering_LateKeepDuringFailedProcessingUpdate(t *testing.T) {
+	p := &trackedQueuedChoicePlatform{}
+	p.n = "test"
+	e := NewEngine("test", &stubAgent{}, []Platform{p}, "", LangEnglish)
+	t.Cleanup(func() { _ = e.Stop() })
+	q := queuedMessage{queueID: "one", platform: p, userID: "author", msgSessionKey: "test:chat", content: "queued task"}
+	q.choiceReceipt = e.sendQueuedMessageChoice(p, "user-message", q)
+	p.mu.Lock()
+	p.updateErr = errors.New("temporary failure")
+	p.mu.Unlock()
+	e.markQueuedMessageProcessing(q)
+	e.finishQueuedMessageChoice(p, &Message{}, q, MsgQueueKept, MsgMessageQueued, "blue")
+	if len(p.getSent()) != 0 {
+		t.Fatal("late Keep incorrectly reported a processing message as queued")
+	}
+}
