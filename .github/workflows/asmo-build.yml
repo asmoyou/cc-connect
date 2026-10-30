@@ -8,6 +8,9 @@ on:
 permissions:
   contents: read
 
+env:
+  ASMO_VERSION: v1.5.1-beta.4.steering.5
+
 concurrency:
   group: asmo-build-${{ github.ref }}
   cancel-in-progress: true
@@ -93,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/asmo/release
-          version=v1.5.1-beta.4.steering.5
+          version="$ASMO_VERSION"
           commit=$(git rev-parse --short HEAD)
           built=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
           for target in darwin linux; do
@@ -172,7 +175,7 @@ jobs:
           set -euo pipefail
           (cd dist && sha256sum --check SHA256SUMS)
           cat > release-notes.md <<EOF
-          Fork build of cc-connect v1.5.1-beta.4.steering.4, including queued-message card improvements and safe session switching with latest-message previews.
+          Fork build of cc-connect $ASMO_VERSION, including queued-message card recovery and safe session switching with latest-message previews.
 
           Commit: $BUILD_SHA
           Build and checks: $BUILD_RUN_URL
