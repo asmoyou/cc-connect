@@ -105,7 +105,7 @@ func (e *Engine) updateQueuedMessageChoice(p Platform, msg *Message, queued queu
 	receipt.mu.Lock()
 	defer receipt.mu.Unlock()
 	if receipt.processing && title != MsgQueueProcessing {
-		return receipt.synced
+		return true
 	}
 	if title == MsgQueueProcessing {
 		receipt.processing = true
