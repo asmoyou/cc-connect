@@ -73,6 +73,19 @@ jobs:
           fi
           cat regression-before.log
           grep -q 'automatically delivered card still has active choices' regression-before.log
+      - name: Confirm card retry regression detects exhausted updates
+        run: |
+          original=$(mktemp)
+          cp core/queued_steering.go "$original"
+          trap 'cp "$original" core/queued_steering.go; rm -f "$original"' EXIT
+          sed -i '/^[[:space:]]*go e.retryQueuedChoice(receipt)$/d' core/queued_steering.go
+          if go test ./core/ -run '^TestCUJ_C6_QueuedMessageDeliveryChoice/automatic_card_update_recovers$' > retry-regression-before.log 2>&1; then
+            cat retry-regression-before.log
+            echo 'Card retry regression unexpectedly passed without retry scheduling'
+            exit 1
+          fi
+          cat retry-regression-before.log
+          grep -q 'async question journey did not reach expected state' retry-regression-before.log
       - name: Build and package Mac and Linux arm64 binaries
         env:
           GOARCH: arm64
@@ -80,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/asmo/release
-          version=v1.5.1-beta.4.steering.4
+          version=v1.5.1-beta.4.steering.5
           commit=$(git rev-parse --short HEAD)
           built=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
           for target in darwin linux; do
