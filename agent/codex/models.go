@@ -54,7 +54,7 @@ func (a *Agent) loadModelsFromCLI(ctx context.Context) ([]core.ModelOption, erro
 	if err != nil {
 		return nil, fmt.Errorf("model list stdin: %w", err)
 	}
-	defer stdin.Close()
+	defer func() { _ = stdin.Close() }()
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, fmt.Errorf("model list stdout: %w", err)
