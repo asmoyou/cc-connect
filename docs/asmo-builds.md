@@ -1,6 +1,8 @@
 # Asmo fork builds
 
-我们 fork 的维护和打包分支是 `main`。通过检查后，GitHub Actions 自动更新 [asmo-latest 预览版](https://github.com/asmoyou/cc-connect/releases/tag/asmo-latest)。这是包含消息队列卡片改进、会话恢复失败保护和切换后最近消息预览的 fork 版本。
+我们 fork 的维护和打包分支是 `main`。同步官方更新时，先将官方 `main` 合入本仓库 `main`，保留我们的功能，再由 GitHub Actions 完整验证并更新 [asmo-latest 预览版](https://github.com/asmoyou/cc-connect/releases/tag/asmo-latest)。提交给官方的功能分支单独 rebase 不会更新打包分支。
+
+当前版本为 `v1.5.3-beta.1.asmo.1`，包含官方最新代码、消息队列卡片改进、会话恢复失败保护、切换后最近消息预览，以及 Codex 原生模型列表修复。Release 说明记录打包提交和检查链接；安装后运行 `cc-connect --version` 可核对版本及提交。
 
 目前提供两个预编译版本，无需拉取源码或安装 Go：
 

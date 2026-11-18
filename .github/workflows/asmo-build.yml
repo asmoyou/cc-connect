@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 env:
-  ASMO_VERSION: v1.5.1-beta.4.steering.5
+  ASMO_VERSION: v1.5.3-beta.1.asmo.1
 
 concurrency:
   group: asmo-build-${{ github.ref }}
@@ -38,7 +38,7 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - name: Check Go formatting
         run: |
-          files=$(gofmt -l core/queued_steering.go core/queued_steering_test.go core/cuj_test.go core/i18n.go core/interfaces.go platform/feishu/card.go platform/feishu/feishu.go platform/feishu/queued_steering_test.go platform/feishu/card_action_update_test.go core/session_switch.go core/session_switch_test.go core/session_id_validation_test.go core/session_teardown_test.go core/relay_test.go core/engine_test.go agent/codex/appserver_session.go agent/codex/appserver_session_test.go agent/acp/session.go agent/acp/session_resume_test.go agent/copilot/session.go agent/copilot/session_resume_test.go)
+          files=$(gofmt -l core/queued_steering.go core/queued_steering_test.go core/cuj_test.go core/i18n.go core/interfaces.go platform/feishu/card.go platform/feishu/feishu.go platform/feishu/queued_steering_test.go platform/feishu/card_action_update_test.go core/session_switch.go core/session_switch_test.go core/session_id_validation_test.go core/session_teardown_test.go core/relay_test.go core/engine_test.go agent/codex/appserver_session.go agent/codex/appserver_session_test.go agent/codex/codex.go agent/codex/codex_cache_test.go agent/codex/models.go agent/codex/models_test.go agent/acp/session.go agent/acp/session_resume_test.go agent/copilot/session.go agent/copilot/session_resume_test.go)
           if [ -n "$files" ]; then
             printf '%s\n' "$files"
             while IFS= read -r file; do
@@ -58,11 +58,11 @@ jobs:
       - name: Lint changed Go code
         run: |
           go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
-          "$(go env GOPATH)/bin/golangci-lint" run --new-from-rev origin/main ./...
+          "$(go env GOPATH)/bin/golangci-lint" run --new-from-rev HEAD^ ./...
       - name: Run critical user journeys and interaction race checks
         run: |
           go test ./core/ -run TestCUJ
-          go test -race ./core ./platform/feishu ./agent/codex ./agent/acp ./agent/copilot -run 'TestQueuedSteering|TestCUJ_C6|TestInteractivePlatform_QueuedSteeringCallbacks|TestUpdateActionCard|TestSendTrackedCard|TestAppServerSession_.*Idle|TestCUJ_B3|TestSwitchPreview|TestUnsafeResume|TestResumeFailure|TestIssue599|TestHandleRelay_Resume|TestHandshake_|TestAppServerSession_.*Resume'
+          go test -race ./core ./platform/feishu ./agent/codex ./agent/acp ./agent/copilot -run 'TestQueuedSteering|TestCUJ_C6|TestInteractivePlatform_QueuedSteeringCallbacks|TestUpdateActionCard|TestSendTrackedCard|TestBotMenuReply|TestAvailableModels|TestNativeModels|TestMiniMaxAvailableModels|TestAppServerSession_.*Idle|TestCUJ_B3|TestSwitchPreview|TestUnsafeResume|TestResumeFailure|TestIssue599|TestHandleRelay_Resume|TestHandshake_|TestAppServerSession_.*Resume'
       - name: Confirm regression test detects the original bug
         run: |
           original=$(mktemp)
@@ -89,6 +89,26 @@ jobs:
           fi
           cat retry-regression-before.log
           grep -q 'async question journey did not reach expected state' retry-regression-before.log
+      - name: Confirm native model discovery regression detects stale catalogs
+        run: |
+          original=$(mktemp)
+          cp agent/codex/codex.go "$original"
+          trap 'cp "$original" agent/codex/codex.go; rm -f "$original"' EXIT
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path("agent/codex/codex.go")
+          source = path.read_text()
+          start = source.index("\tif models, err := a.loadModelsFromCLI(ctx);")
+          end = source.index("\tif models := readCodexModelCatalog();", start)
+          path.write_text(source[:start] + source[end:])
+          PY
+          if go test ./agent/codex -run '^TestAvailableModels_NativeListOverridesStaleCacheAndGenericAPI$' > models-regression-before.log 2>&1; then
+            cat models-regression-before.log
+            echo 'Model discovery regression unexpectedly passed without native discovery'
+            exit 1
+          fi
+          cat models-regression-before.log
+          grep -q 'stale cache must not win' models-regression-before.log
       - name: Build and package Mac and Linux arm64 binaries
         env:
           GOARCH: arm64
@@ -175,7 +195,7 @@ jobs:
           set -euo pipefail
           (cd dist && sha256sum --check SHA256SUMS)
           cat > release-notes.md <<EOF
-          Fork build of cc-connect $ASMO_VERSION, including queued-message card recovery and safe session switching with latest-message previews.
+          Fork build of cc-connect $ASMO_VERSION, synchronized with upstream main and including queued-message card recovery, safe session switching with latest-message previews, and native Codex model discovery.
 
           Commit: $BUILD_SHA
           Build and checks: $BUILD_RUN_URL
@@ -189,7 +209,7 @@ jobs:
           if gh release view asmo-latest >/dev/null 2>&1; then
             gh release upload asmo-latest dist/* --clobber
             gh api --method PATCH "repos/$GH_REPO/git/refs/tags/asmo-latest" -f sha="$BUILD_SHA" -F force=true
-            gh release edit asmo-latest --title 'Asmo latest preview (macOS and Linux ARM64)' --notes-file release-notes.md --prerelease
+            gh release edit asmo-latest --target "$BUILD_SHA" --title "Asmo $ASMO_VERSION (macOS and Linux ARM64)" --notes-file release-notes.md --prerelease
           else
-            gh release create asmo-latest dist/* --target "$BUILD_SHA" --title 'Asmo latest preview (macOS and Linux ARM64)' --notes-file release-notes.md --prerelease
+            gh release create asmo-latest dist/* --target "$BUILD_SHA" --title "Asmo $ASMO_VERSION (macOS and Linux ARM64)" --notes-file release-notes.md --prerelease
           fi

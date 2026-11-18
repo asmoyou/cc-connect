@@ -15,7 +15,7 @@ import (
 )
 
 func TestSendTrackedCard_UpdatesWithoutButtonCallback(t *testing.T) {
-	for _, scenario := range []string{"chat", "thread", "missing-id"} {
+	for _, scenario := range []string{"chat", "thread", "missing-id", "open-id"} {
 		t.Run(scenario, func(t *testing.T) {
 			var sent atomic.Int32
 			patches := make(chan string, 1)
@@ -36,6 +36,9 @@ func TestSendTrackedCard_UpdatesWithoutButtonCallback(t *testing.T) {
 						}
 					} else if r.URL.Path != "/open-apis/im/v1/messages" {
 						t.Errorf("unexpected tracked card route: %s", r.URL.Path)
+					}
+					if scenario == "open-id" && (r.URL.Query().Get("receive_id_type") != "open_id" || body["receive_id"] != "ou_menu_user") {
+						t.Errorf("tracked card lost bot-menu recipient type: %s %#v", r.URL, body)
 					}
 					id := "om_choice"
 					if scenario == "missing-id" {
@@ -69,7 +72,11 @@ func TestSendTrackedCard_UpdatesWithoutButtonCallback(t *testing.T) {
 				key = "feishu:oc_chat:root:om_thread"
 			}
 			initial := core.NewCard().Markdown("queued task").Buttons(core.PrimaryBtn("Add now", "cmd:/ps --queued one")).Build()
-			receipt, err := p.SendTrackedCard(context.Background(), replyContext{messageID: "om_user", chatID: "oc_chat", sessionKey: key}, initial)
+			rc := replyContext{messageID: "om_user", chatID: "oc_chat", sessionKey: key}
+			if scenario == "open-id" {
+				rc.chatID, rc.receiveIDType = "ou_menu_user", "open_id"
+			}
+			receipt, err := p.SendTrackedCard(context.Background(), rc, initial)
 			if err != nil || sent.Load() != 1 {
 				t.Fatalf("tracked send failed or duplicated: err=%v sends=%d", err, sent.Load())
 			}
